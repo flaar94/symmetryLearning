@@ -98,12 +98,12 @@ if __name__ == '__main__':
                             lambda x: x.view(-1),
                             lambda x: x.numpy()])
             if dataset == 'emnist':
-                trainset = torchvision.datasets.EMNIST(root=DATA_PATH, train=True,
+                trainset = torchvision.datasets.EMNIST(root=str(DATA_PATH), train=True,
                                                        download=True, transform=transform,
                                                        split="digits"
                                                        )
             else:
-                trainset = torchvision.datasets.MNIST(root=DATA_PATH, train=True,
+                trainset = torchvision.datasets.MNIST(root=str(DATA_PATH), train=True,
                                                       download=True, transform=transform,
                                                       )
 

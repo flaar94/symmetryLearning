@@ -280,7 +280,7 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         self.cov_eigenvalues_ = np.maximum(np.real(np.linalg.eig(cov)[0]), 0)
         self.eigenvectors_ = np.real(np.linalg.eig(cov)[1])
 
-        cov_eigenval_ranking = rankdata(self.cov_eigenvalues_, 'ordinal').astype(np.long) - 1
+        cov_eigenval_ranking = rankdata(self.cov_eigenvalues_, 'ordinal').astype(np.int64) - 1
         self.cov_eigenvalues_[cov_eigenval_ranking] = np.array(self.cov_eigenvalues_)
         self.eigenvectors_[:, cov_eigenval_ranking] = np.array(self.eigenvectors_)
 
