@@ -20,8 +20,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-
 UTIL_DATA = '../data/util_data.pkl'
+
 
 # def init_weights(m):
 #     if type(m) == nn.Linear:
@@ -509,9 +509,10 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
 
 
 class SymmetryFinderLabel(SymmetryFinder):
-    def __init__(self, select_method='', fit_method='', **kwargs):
+    def __init__(self, select_method='', fit_method='', bidirectional=False, **kwargs):
         kwargs['select_method'] = select_method
         kwargs['fit_method'] = fit_method
+        self.bidirectional = bidirectional
         super().__init__(**kwargs)
 
     def fit(self, X: np.array, y: np.array = None, overall_cov=None):
@@ -541,26 +542,41 @@ class SymmetryFinderLabel(SymmetryFinder):
             se_label = mu_label ** 2 / (cov_label.diagonal() + self.ranking_gamma)
 
             theta_tilde[:-1, :-1] += ((np.log(1 + corr_label + self.ranking_gamma) -
-                                      np.log(1 - corr_label + self.ranking_gamma)) / 2) ** 2
+                                       np.log(1 - corr_label + self.ranking_gamma)) / 2) ** 2
             theta_tilde[-1, :-1] += se_label
             theta_tilde[:-1, -1] += se_label
         theta_tilde /= self.num_labels_
+        # theta_tilde = theta_tilde ** (1/2)
+
         theta_tilde -= np.diag(theta_tilde.diagonal())
 
-        self._dissimilarity_analysis(theta_tilde)
-        print(theta_tilde[-4:, -4:])
+        self._dissimilarity_analysis(theta_tilde, bidirectional=self.bidirectional)
+        # print(theta_tilde[-4:, -4:])
         # reindexer = np.array([pos - 1 if x == 1 else X.shape[1] - neg for x, pos, neg in
         #        zip(self.trans_eigenvalues_,
         #            itertools.accumulate((self.trans_eigenvalues_ == 1).astype(int)),
         #            itertools.accumulate((self.trans_eigenvalues_ == -1).astype(int)))])
+        # theta_tilde[np.argsort(self.trans_eigenvalues_)]
         # print(theta_tilde[:-1, :-1][reindexer][:, reindexer])
         # plt.imshow(theta_tilde[:-1, :-1][reindexer][:, reindexer])
+
+        # sns.displot([theta_tilde[i, j] for i, j in itertools.product(range(theta_tilde.shape[0]), range(theta_tilde.shape[1])) if i != j and i < theta_tilde.shape[0] - 1 and j < theta_tilde.shape[1] - 1], log_scale=True)
+        # plt.xscale("log")
+        ordered_theta = theta_tilde[:-1, :-1][np.argsort(self.trans_eigenvalues_ + theta_tilde[-1, :-1] / 1_000_000)][:,
+                        np.argsort(self.trans_eigenvalues_ + theta_tilde[-1, :-1] / 1_000_000)]
+        block_size = (self.trans_eigenvalues_ == 1).astype(int).sum()
+        print(ordered_theta[:block_size, :block_size].sum(), ordered_theta[block_size:, :block_size].sum())
+        print(ordered_theta[:block_size, block_size:].sum(), ordered_theta[block_size:, block_size:].sum())
+        # print(theta_tilde[:-1, :-1].shape, np.diag(theta_tilde[-1, :-1]).shape)
+        # theta_tilde[:-1, :-1] += np.diag(theta_tilde[-1, :-1])
+        # plt.imshow(np.log(10 ** -10 + np.abs(
+        #     theta_tilde[:-1, :-1][np.argsort(self.trans_eigenvalues_)][:, np.argsort(self.trans_eigenvalues_)])))
         # plt.vlines(sum(self.trans_eigenvalues_ == 1), ymin=0, ymax=X.shape[1] - 1)
         # plt.hlines(sum(self.trans_eigenvalues_ == 1), xmin=0, xmax=X.shape[1] - 1)
         # plt.show()
         return self
 
-    def _dissimilarity_analysis(self, theta):
+    def _dissimilarity_analysis(self, theta, bidirectional=False):
         # Start the fixed point cluster with the auxiliary node
         static_vectors = np.array([False if i < theta.shape[0] - 1 else True for i in range(theta.shape[0])])
         for i in range(theta.shape[0]):
@@ -569,6 +585,8 @@ class SymmetryFinderLabel(SymmetryFinder):
             within_sim = np.mean(theta[:, ~static_vectors], axis=1)
 
             diff = (between_sim - within_sim) * ~static_vectors
+            # print(diff)
+            # print()
             if isinstance(self.select_method, int):
                 static_vectors[np.argmax(diff)] = True
                 if self.select_method == theta.shape[0] - 2 - i:
@@ -581,12 +599,29 @@ class SymmetryFinderLabel(SymmetryFinder):
                     break
         else:
             raise TimeoutError("Error, clustering algorithm failed to terminate")
-        # Remove auxiliary node
         static_vectors = static_vectors[:-1]
+
+        if bidirectional:
+            theta_partial = theta[:-1, :-1]
+            for _ in range(theta.shape[0]):
+                dist_to_static = np.mean(theta_partial[:, static_vectors], axis=1)
+                dist_to_variable = np.mean(theta_partial[:, ~static_vectors], axis=1)
+
+                diff = (dist_to_static - dist_to_variable) * (~static_vectors * 2. - 1)
+                # print(diff)
+                # print()
+                if max(diff) > 0:
+                    static_vectors[np.argmax(diff)] = ~static_vectors[np.argmax(diff)]
+                    # print(np.argmax(diff), np.max(diff))
+                else:
+                    break
+            else:
+                print("clustering algorithm failed to terminate in bidirectional step")
+
+        # Remove auxiliary node
 
         static_vectors |= self.trivial_vectors_
         self.trans_eigenvalues_ = static_vectors * 2. - 1
-        # print(self.trans_eigenvalues_)
         self.trans_ = self.eigenvectors_ @ np.diag(self.trans_eigenvalues_) @ self.eigenvectors_.T
 
 
