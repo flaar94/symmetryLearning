@@ -459,8 +459,10 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         linear_nn.to(self.device)
         linear_nn.trans = linear_nn.trans.to(self.device)
         my_init = MyInit(torch.tensor(self.eigenvectors_.T, device=self.device),
-                         torch.tensor(np.diag(self.trans_eigenvalues_), device=self.device))
+                         torch.tensor(np.diag(self.trans_eigenvalues_), device=self.device, requires_grad=True))
         my_init(linear_nn)
+        # print((linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight)[:5, :5])
+        # print(self.trans_[:5, :5])
 
         trainloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
@@ -473,6 +475,7 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         for epoch in range(epochs):
             # loop over the dataset multiple times
             true_epoch += 1
+            total_loss = 0.
             for i, data in enumerate(trainloader, 0):
                 # get the inputs
                 inputs, = data
@@ -482,15 +485,26 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
                 # forward + backward + optimize
                 outputs = linear_nn(inputs)
                 loss = criterion(inputs, outputs)
+                total_loss += loss.detach().cpu().item()
 
                 orth_loss = weight_criterion(linear_nn.fc1.weight.t() @ linear_nn.fc1.weight,
                                              id_mat) * weight_penalty_adj
-
+                # print(epoch, i, loss)
                 loss += orth_loss
+
+                negativity_loss = weight_criterion(
+                    F.relu(-linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight),
+                    torch.zeros_like(linear_nn.trans) * weight_penalty_adj
+                )
+
+                loss += negativity_loss
+
                 loss.backward()
                 optimizer.step()
                 if torch.isnan(linear_nn.fc1.weight).any():
                     raise ValueError("Fine Tune failure. NaNs in the model")
+            if true_epoch % 20 == 1:
+                print(f"starting fine tuning epoch {true_epoch} \n Total cum loss = {total_loss / i}")
 
         self.ft_trans_ = (linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight).detach().cpu().numpy()
         self.fine_tuned = True
@@ -564,7 +578,7 @@ class SymmetryFinderLabel(SymmetryFinder):
         # plt.xscale("log")
         ordered_theta = theta_tilde[:-1, :-1][np.argsort(self.trans_eigenvalues_ + theta_tilde[-1, :-1] / 1_000_000)][:,
                         np.argsort(self.trans_eigenvalues_ + theta_tilde[-1, :-1] / 1_000_000)]
-        block_size = (self.trans_eigenvalues_ == 1).astype(int).sum()
+        block_size = (self.trans_eigenvalues_ == -1).astype(int).sum()
         print(ordered_theta[:block_size, :block_size].sum(), ordered_theta[block_size:, :block_size].sum())
         print(ordered_theta[:block_size, block_size:].sum(), ordered_theta[block_size:, block_size:].sum())
         # print(theta_tilde[:-1, :-1].shape, np.diag(theta_tilde[-1, :-1]).shape)
@@ -579,12 +593,13 @@ class SymmetryFinderLabel(SymmetryFinder):
     def _dissimilarity_analysis(self, theta, bidirectional=False):
         # Start the fixed point cluster with the auxiliary node
         static_vectors = np.array([False if i < theta.shape[0] - 1 else True for i in range(theta.shape[0])])
+        # expanded_trivial_vectors = np.append(self.trivial_vectors_, np.array([False]))
         for i in range(theta.shape[0]):
             # Create matrix of distances between and within clusters, then compute average distance
-            between_sim = np.mean(theta[:, static_vectors], axis=1)
-            within_sim = np.mean(theta[:, ~static_vectors], axis=1)
+            between_sim = np.mean(theta[:, static_vectors], axis=1) # & ~expanded_trivial_vectors
+            within_sim = np.mean(theta[:, ~static_vectors], axis=1) #& ~expanded_trivial_vectors
 
-            diff = (between_sim - within_sim) * ~static_vectors
+            diff = (between_sim - within_sim) * ~static_vectors # * ~expanded_trivial_vectors
             # print(diff)
             # print()
             if isinstance(self.select_method, int):
@@ -593,7 +608,6 @@ class SymmetryFinderLabel(SymmetryFinder):
                     break
             else:
                 if max(diff) > 0:
-                    print(between_sim[np.argmax(diff)], within_sim[np.argmax(diff)])
                     static_vectors[np.argmax(diff)] = True
                 else:
                     break
