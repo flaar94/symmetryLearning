@@ -529,7 +529,7 @@ class SymmetryFinderLabel(SymmetryFinder):
         self.bidirectional = bidirectional
         super().__init__(**kwargs)
 
-    def fit(self, X: np.array, y: np.array = None, overall_cov=None):
+    def fit(self, X: np.array, y: np.array = None, overall_cov=None, heal_eigenvectors=False):
 
         if self.tv_ratio != 1:
             X_train, X_val = train_test_split(X, train_size=int(X.shape[0] * self.tv_ratio),
@@ -544,6 +544,9 @@ class SymmetryFinderLabel(SymmetryFinder):
                 overall_cov = np.cov(X_train, rowvar=False)
 
         self.compute_base_stats(X_train, overall_cov)
+
+        if heal_eigenvectors:
+            self._heal_eigenvectors(X_train, y)
 
         self.num_labels_ = len(np.unique(y))
 
@@ -590,16 +593,97 @@ class SymmetryFinderLabel(SymmetryFinder):
         # plt.show()
         return self
 
+    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=np.inf, eigenvalue_size_threshold=10 ** -8):
+        labels = np.unique(y)
+        for i in range(1, self.cov_eigenvalues_.shape[0]):
+            # Grab pairs of adjacent eigenvectors/eigenvalues
+            eigenvalues = self.cov_eigenvalues_[i - 1:i + 1]
+            if (eigenvalues.min() < eigenvalue_size_threshold):
+                print(f"One of eigenvalues = ({eigenvalues[0], eigenvalues[1]}) less than {eigenvalue_size_threshold}")
+                continue
+            if (np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() > eigenvalue_diff_threshold):
+                print(
+                    f"(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() = {(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min()} < {eigenvalue_diff_threshold}")
+                continue
+            print()
+            eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            numerator = 0
+            denominator = 0
+            for label in labels:
+                X_label = X[y == label]
+                cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
+                numerator += cov_label[0, 1] * np.trace(cov_label)
+                denominator += np.trace(cov_label) ** 2
+
+            if True:
+                multilabel_cov_penalty = 0.
+                for i, label in enumerate(labels):
+                    X_label = X[y == label]
+                    cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
+                    multilabel_cov_penalty += (cov_label[0, 1] - np.trace(cov_label) * numerator / denominator) ** 2
+                    if i < 3:
+                        print(cov_label)
+            # Could write this out without sin/cos
+            optimal_angle = - np.arcsin(2 * numerator / denominator) / 2
+            c, s = np.cos(optimal_angle), np.sin(optimal_angle)
+            optimal_rotation = np.array(((c, -s), (s, c)))
+
+            print(eigenvalues)
+            print(f"{multilabel_cov_penalty=}")
+            print(optimal_rotation)
+
+            # ------------------------------Before transformation eigenvalue check--------------------------------------
+            # temp_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            # pixel_width = round(np.sqrt(temp_eigenvectors.shape[0]))
+            # temp_eigenvectors = temp_eigenvectors.T.reshape(-1, pixel_width, pixel_width)
+            # diff = (temp_eigenvectors.reshape(-1, pixel_width * pixel_width) @
+            #         temp_eigenvectors[:, :, ::-1].reshape(-1, pixel_width * pixel_width).T
+            #         ).diagonal()
+            # diff = diff.reshape(-1)
+            # diff = np.arccos(diff) * 180 / np.pi
+            # print(f"Angle before transformation = {diff}")
+            # ------------------------------Before transformation eigenvalue check end----------------------------------
+
+            self.eigenvectors_[:, i - 1:i + 1] = eigenvectors @ optimal_rotation
+
+            # ------------------------------After transformation eigenvalue check--------------------------------------
+            # temp_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            # temp_eigenvectors = temp_eigenvectors.T.reshape(-1, pixel_width, pixel_width)
+            # diff = (temp_eigenvectors.reshape(-1, pixel_width * pixel_width) @
+            #         temp_eigenvectors[:, :, ::-1].reshape(-1, pixel_width * pixel_width).T
+            #         ).diagonal()
+            # diff = diff.reshape(-1)
+            # diff = np.arccos(diff) * 180 / np.pi
+            # print(f"Angle after transformation = {diff}")
+            # ------------------------------After transformation eigenvalue check end----------------------------------
+            if True:
+                eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+                numerator = 0
+                denominator = 0
+                for label in labels:
+                    X_label = X[y == label]
+                    cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
+                    numerator += cov_label[0, 1] * np.trace(cov_label)
+                    denominator += np.trace(cov_label) ** 2
+                if True:
+                    multilabel_cov_penalty = 0.
+                    for label in labels:
+                        X_label = X[y == label]
+                        cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
+                        multilabel_cov_penalty += (cov_label[0, 1] - np.trace(cov_label) * numerator / denominator) ** 2
+                print(f"multilabel_cov_penalty after transformation = {multilabel_cov_penalty}")
+            print()
+
     def _dissimilarity_analysis(self, theta, bidirectional=False):
         # Start the fixed point cluster with the auxiliary node
         static_vectors = np.array([False if i < theta.shape[0] - 1 else True for i in range(theta.shape[0])])
         # expanded_trivial_vectors = np.append(self.trivial_vectors_, np.array([False]))
         for i in range(theta.shape[0]):
             # Create matrix of distances between and within clusters, then compute average distance
-            between_sim = np.mean(theta[:, static_vectors], axis=1) # & ~expanded_trivial_vectors
-            within_sim = np.mean(theta[:, ~static_vectors], axis=1) #& ~expanded_trivial_vectors
+            between_sim = np.mean(theta[:, static_vectors], axis=1)  # & ~expanded_trivial_vectors
+            within_sim = np.mean(theta[:, ~static_vectors], axis=1)  # & ~expanded_trivial_vectors
 
-            diff = (between_sim - within_sim) * ~static_vectors # * ~expanded_trivial_vectors
+            diff = (between_sim - within_sim) * ~static_vectors  # * ~expanded_trivial_vectors
             # print(diff)
             # print()
             if isinstance(self.select_method, int):
