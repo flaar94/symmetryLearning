@@ -436,7 +436,7 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         else:
             return X @ self.trans_.T
 
-    def fine_tune(self, X, lr=0.01, epochs=100, weight_penalty_adj=3_000, bandwidth=10):
+    def fine_tune(self, X, lr=0.01, epochs=100, weight_penalty_adj=3_000, bandwidth=10, negativity_penalty=False):
         BATCH_SIZE = 1_024
         dataset = TensorDataset(torch.tensor(X, dtype=torch.float, device=self.device))
         # tensor_trans = torch.tensor(self.trans_.T, dtype=torch.double, device=self.device)
@@ -491,13 +491,13 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
                                              id_mat) * weight_penalty_adj
                 # print(epoch, i, loss)
                 loss += orth_loss
+                if negativity_penalty:
+                    negativity_loss = weight_criterion(
+                        F.relu(-linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight),
+                        torch.zeros_like(linear_nn.trans) * weight_penalty_adj
+                    )
 
-                negativity_loss = weight_criterion(
-                    F.relu(-linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight),
-                    torch.zeros_like(linear_nn.trans) * weight_penalty_adj
-                )
-
-                loss += negativity_loss
+                    loss += negativity_loss
 
                 loss.backward()
                 optimizer.step()
