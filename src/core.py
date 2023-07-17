@@ -19,6 +19,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import copy
 
 UTIL_DATA = '../data/util_data.pkl'
 
@@ -593,7 +594,7 @@ class SymmetryFinderLabel(SymmetryFinder):
         # plt.show()
         return self
 
-    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=np.inf, eigenvalue_size_threshold=10 ** -8):
+    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=np.inf, eigenvalue_size_threshold=10 ** -8, penalty_variation_threshold=10):
         labels = np.unique(y)
         for i in range(1, self.cov_eigenvalues_.shape[0]):
             # Grab pairs of adjacent eigenvectors/eigenvalues
@@ -607,70 +608,90 @@ class SymmetryFinderLabel(SymmetryFinder):
                 continue
             print()
             eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+
             numerator = 0
             denominator = 0
             for label in labels:
                 X_label = X[y == label]
-                cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
-                numerator += cov_label[0, 1] * np.trace(cov_label)
-                denominator += np.trace(cov_label) ** 2
+                cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+                numerator += 2 * cov_label[0, 1] * (cov_label[1, 1] - cov_label[0, 0])
+                denominator += ((cov_label[1, 1] - cov_label[0, 0]) / 2) ** 2 - cov_label[0, 1] ** 2
+            # Also add in loss for the full covariance
+            denominator += ((eigenvalues[1] - eigenvalues[0]) / 2) ** 2 * np.sqrt(len(labels))
 
             if True:
                 multilabel_cov_penalty = 0.
-                for i, label in enumerate(labels):
+                for _, label in enumerate(labels):
                     X_label = X[y == label]
-                    cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
-                    multilabel_cov_penalty += (cov_label[0, 1] - np.trace(cov_label) * numerator / denominator) ** 2
-                    if i < 3:
-                        print(cov_label)
-            # Could write this out without sin/cos
-            optimal_angle = - np.arcsin(2 * numerator / denominator) / 2
+                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
+            print(f"{multilabel_cov_penalty=}")
+
+            cov_penalties = []
+            base_angle = - np.arctan(numerator / denominator) / 4
+            # We want to keep the angle as small as possible in absolute terms so we aren't switching which vectors are
+            # fixed vs. variable
+            potential_angles = [base_angle, base_angle + np.pi / 4 if base_angle < 0 else base_angle - np.pi/4]
+
+            for j, potential_angle in enumerate(potential_angles):
+                # print(f"potential angle {j+1} = {potential_angle * 180 / np.pi}")
+                c, s = np.cos(potential_angle), np.sin(potential_angle)
+                potential_rotation = np.array(((c, -s), (s, c)))
+                # print(f"{potential_rotation=}")
+                multilabel_cov_penalty = 0.
+                # print(f"potential_rotation = {potential_rotation}")
+                for _, label in enumerate(labels):
+                    X_label = X[y == label]
+                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+                    cov_label = potential_rotation.T @ cov_label @ potential_rotation
+                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
+                full_cov = potential_rotation.T @ np.diag(eigenvalues) @ potential_rotation
+                multilabel_cov_penalty += np.sqrt(len(labels)) * (full_cov[0, 1]) ** 2
+                # Finally add in a penalty for the full covariance
+                cov_penalties.append(multilabel_cov_penalty)
+            if np.abs(cov_penalties[0] - cov_penalties[1]) / np.min(cov_penalties) < penalty_variation_threshold:
+                continue
+            print(f"potential angles = {potential_angles}, {np.argmin(cov_penalties)=}")
+            print(f"{cov_penalties=}")
+            optimal_angle = potential_angles[np.argmin(cov_penalties)]
             c, s = np.cos(optimal_angle), np.sin(optimal_angle)
             optimal_rotation = np.array(((c, -s), (s, c)))
 
             print(eigenvalues)
-            print(f"{multilabel_cov_penalty=}")
+
+            print(f"optimal angle in degrees={optimal_angle * 180 / np.pi}")
             print(optimal_rotation)
 
+            def compute_gt_angle(vector, dim):
+                vector = copy.copy(vector)
+                vector = vector.T.reshape(-1, dim, dim)
+                angle_change = (vector.reshape(-1, dim * dim) @
+                        vector[:, :, ::-1].reshape(-1, dim * dim).T
+                        ).diagonal()
+                angle_change = angle_change.reshape(-1)
+                angle_change = np.arccos(angle_change) * 180 / np.pi
+                return angle_change
             # ------------------------------Before transformation eigenvalue check--------------------------------------
-            # temp_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-            # pixel_width = round(np.sqrt(temp_eigenvectors.shape[0]))
-            # temp_eigenvectors = temp_eigenvectors.T.reshape(-1, pixel_width, pixel_width)
-            # diff = (temp_eigenvectors.reshape(-1, pixel_width * pixel_width) @
-            #         temp_eigenvectors[:, :, ::-1].reshape(-1, pixel_width * pixel_width).T
-            #         ).diagonal()
-            # diff = diff.reshape(-1)
-            # diff = np.arccos(diff) * 180 / np.pi
-            # print(f"Angle before transformation = {diff}")
+            test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            pixel_width = round(np.sqrt(test_eigenvectors.shape[0]))
+            diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
+            print(f"Angle before transformation = {diff}")
             # ------------------------------Before transformation eigenvalue check end----------------------------------
-
+            assert (self.eigenvectors_[:, i-1:i+1] == eigenvectors).all(), self.eigenvectors_[:, i-1:i+1] - eigenvectors
             self.eigenvectors_[:, i - 1:i + 1] = eigenvectors @ optimal_rotation
 
             # ------------------------------After transformation eigenvalue check--------------------------------------
-            # temp_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-            # temp_eigenvectors = temp_eigenvectors.T.reshape(-1, pixel_width, pixel_width)
-            # diff = (temp_eigenvectors.reshape(-1, pixel_width * pixel_width) @
-            #         temp_eigenvectors[:, :, ::-1].reshape(-1, pixel_width * pixel_width).T
-            #         ).diagonal()
-            # diff = diff.reshape(-1)
-            # diff = np.arccos(diff) * 180 / np.pi
-            # print(f"Angle after transformation = {diff}")
+            test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
+            print(f"Angle after transformation = {diff}")
             # ------------------------------After transformation eigenvalue check end----------------------------------
             if True:
                 eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-                numerator = 0
-                denominator = 0
-                for label in labels:
+                multilabel_cov_penalty = 0.
+                for i, label in enumerate(labels):
                     X_label = X[y == label]
-                    cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
-                    numerator += cov_label[0, 1] * np.trace(cov_label)
-                    denominator += np.trace(cov_label) ** 2
-                if True:
-                    multilabel_cov_penalty = 0.
-                    for label in labels:
-                        X_label = X[y == label]
-                        cov_label = np.abs(eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors)
-                        multilabel_cov_penalty += (cov_label[0, 1] - np.trace(cov_label) * numerator / denominator) ** 2
+                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
                 print(f"multilabel_cov_penalty after transformation = {multilabel_cov_penalty}")
             print()
 
