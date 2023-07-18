@@ -437,6 +437,56 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         else:
             return X @ self.trans_.T
 
+
+    def gt_swap_score(self, X):
+        BATCH_SIZE = 1_024
+        dataset = TensorDataset(torch.tensor(X, dtype=torch.float, device=self.device))
+        # tensor_trans = torch.tensor(self.trans_.T, dtype=torch.double, device=self.device)
+        d = X.shape[1]
+
+        width = round(np.sqrt(d))
+
+
+        class LinearNN(nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.fc1 = nn.Linear(dim, dim, bias=False)
+                self.trans = torch.block_diag(
+                    *[torch.tensor([[0, 1], [1, 0]], dtype=torch.float) for _ in range(dim // 2)])
+
+            def forward(self, x):
+                x = self.fc1(x)
+                x = F.linear(x, self.trans)
+                x = F.linear(x, self.fc1.weight.t())
+                return x
+
+        linear_nn = LinearNN(d)
+        linear_nn.to(self.device)
+        linear_nn.trans = linear_nn.trans.to(self.device)
+        my_init = MyInit(torch.tensor(self.eigenvectors_.T, device=self.device),
+                         torch.tensor(np.diag(self.trans_eigenvalues_), device=self.device, requires_grad=True))
+        my_init(linear_nn)
+        # print((linear_nn.fc1.weight.t() @ linear_nn.trans @ linear_nn.fc1.weight)[:5, :5])
+        # print(self.trans_[:5, :5])
+
+        trainloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        # criterion = DebiasedMMDLoss(kernel = poly_kernel, r=1, m=2, gamma=0.3)
+        criterion = nn.MSELoss()
+        linear_nn.eval()
+        loss = 0.
+        for i, data in enumerate(trainloader, 0):
+            # get the inputs
+            inputs, = data
+            inputs = inputs.to(self.device)
+
+            outputs = linear_nn(inputs)
+            loss += criterion(torch.flip(inputs.view(-1, width, width), (2,)).view(-1, d), outputs)
+
+        return loss / len(trainloader)
+            # print(epoch, i, loss)
+
+
     def fine_tune(self, X, lr=0.01, epochs=100, weight_penalty_adj=3_000, bandwidth=10, negativity_penalty=False):
         BATCH_SIZE = 1_024
         dataset = TensorDataset(torch.tensor(X, dtype=torch.float, device=self.device))
@@ -594,9 +644,14 @@ class SymmetryFinderLabel(SymmetryFinder):
         # plt.show()
         return self
 
-    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=np.inf, eigenvalue_size_threshold=10 ** -8, penalty_variation_threshold=10):
+    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=0.1, eigenvalue_size_threshold=10 ** -8, penalty_variation_threshold=10):
         labels = np.unique(y)
-        for i in range(1, self.cov_eigenvalues_.shape[0]):
+        # label_covs = []
+        label_covs = [np.cov(X[y == label], rowvar=False) for label in labels]
+        # for label in labels:
+        #     X_label = X[y == label]
+        #     label_covs.append(np.cov(X_label, rowvar=False))
+        for i in range(self.cov_eigenvalues_.shape[0] - 1, 0 + 1, -1):
             # Grab pairs of adjacent eigenvectors/eigenvalues
             eigenvalues = self.cov_eigenvalues_[i - 1:i + 1]
             if (eigenvalues.min() < eigenvalue_size_threshold):
@@ -604,28 +659,26 @@ class SymmetryFinderLabel(SymmetryFinder):
                 continue
             if (np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() > eigenvalue_diff_threshold):
                 print(
-                    f"(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() = {(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min()} < {eigenvalue_diff_threshold}")
+                    f"(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() = {np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min()} > {eigenvalue_diff_threshold}")
                 continue
-            print()
+            print(i)
             eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-
+            proj_label_covs = [eigenvectors.T @ label_cov @ eigenvectors for label_cov in label_covs]
             numerator = 0
             denominator = 0
-            for label in labels:
-                X_label = X[y == label]
-                cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
-                numerator += 2 * cov_label[0, 1] * (cov_label[1, 1] - cov_label[0, 0])
-                denominator += ((cov_label[1, 1] - cov_label[0, 0]) / 2) ** 2 - cov_label[0, 1] ** 2
+            for proj_label_cov in proj_label_covs:
+                numerator += 2 * proj_label_cov[0, 1] * (proj_label_cov[1, 1] - proj_label_cov[0, 0])
+                denominator += ((proj_label_cov[1, 1] - proj_label_cov[0, 0]) / 2) ** 2 - proj_label_cov[0, 1] ** 2
             # Also add in loss for the full covariance
             denominator += ((eigenvalues[1] - eigenvalues[0]) / 2) ** 2 * np.sqrt(len(labels))
 
-            if True:
-                multilabel_cov_penalty = 0.
-                for _, label in enumerate(labels):
-                    X_label = X[y == label]
-                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
-                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
-            print(f"{multilabel_cov_penalty=}")
+            # if True:
+            #     multilabel_cov_penalty = 0.
+            #     for _, label in enumerate(labels):
+            #         X_label = X[y == label]
+            #         cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+            #         multilabel_cov_penalty += (cov_label[0, 1]) ** 2
+            #     print(f"{multilabel_cov_penalty=}")
 
             cov_penalties = []
             base_angle = - np.arctan(numerator / denominator) / 4
@@ -640,11 +693,10 @@ class SymmetryFinderLabel(SymmetryFinder):
                 # print(f"{potential_rotation=}")
                 multilabel_cov_penalty = 0.
                 # print(f"potential_rotation = {potential_rotation}")
-                for _, label in enumerate(labels):
-                    X_label = X[y == label]
-                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
-                    cov_label = potential_rotation.T @ cov_label @ potential_rotation
-                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
+                for proj_label_cov in proj_label_covs:
+                    # X_label = X[y == label]
+                    proj_label_cov = potential_rotation.T @ proj_label_cov @ potential_rotation
+                    multilabel_cov_penalty += (proj_label_cov[0, 1]) ** 2
                 full_cov = potential_rotation.T @ np.diag(eigenvalues) @ potential_rotation
                 multilabel_cov_penalty += np.sqrt(len(labels)) * (full_cov[0, 1]) ** 2
                 # Finally add in a penalty for the full covariance
@@ -662,37 +714,37 @@ class SymmetryFinderLabel(SymmetryFinder):
             print(f"optimal angle in degrees={optimal_angle * 180 / np.pi}")
             print(optimal_rotation)
 
-            def compute_gt_angle(vector, dim):
-                vector = copy.copy(vector)
-                vector = vector.T.reshape(-1, dim, dim)
-                angle_change = (vector.reshape(-1, dim * dim) @
-                        vector[:, :, ::-1].reshape(-1, dim * dim).T
-                        ).diagonal()
-                angle_change = angle_change.reshape(-1)
-                angle_change = np.arccos(angle_change) * 180 / np.pi
-                return angle_change
+            # def compute_gt_angle(vector, dim):
+            #     vector = copy.copy(vector)
+            #     vector = vector.T.reshape(-1, dim, dim)
+            #     angle_change = (vector.reshape(-1, dim * dim) @
+            #             vector[:, :, ::-1].reshape(-1, dim * dim).T
+            #             ).diagonal()
+            #     angle_change = angle_change.reshape(-1)
+            #     angle_change = np.arccos(angle_change) * 180 / np.pi
+            #     return angle_change
             # ------------------------------Before transformation eigenvalue check--------------------------------------
-            test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-            pixel_width = round(np.sqrt(test_eigenvectors.shape[0]))
-            diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
-            print(f"Angle before transformation = {diff}")
+            # test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            # pixel_width = round(np.sqrt(test_eigenvectors.shape[0]))
+            # diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
+            # print(f"Angle before transformation = {diff}")
             # ------------------------------Before transformation eigenvalue check end----------------------------------
-            assert (self.eigenvectors_[:, i-1:i+1] == eigenvectors).all(), self.eigenvectors_[:, i-1:i+1] - eigenvectors
+
             self.eigenvectors_[:, i - 1:i + 1] = eigenvectors @ optimal_rotation
 
             # ------------------------------After transformation eigenvalue check--------------------------------------
-            test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-            diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
-            print(f"Angle after transformation = {diff}")
+            # test_eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            # diff = compute_gt_angle(test_eigenvectors, dim=pixel_width)
+            # print(f"Angle after transformation = {diff}")
             # ------------------------------After transformation eigenvalue check end----------------------------------
-            if True:
-                eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
-                multilabel_cov_penalty = 0.
-                for i, label in enumerate(labels):
-                    X_label = X[y == label]
-                    cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
-                    multilabel_cov_penalty += (cov_label[0, 1]) ** 2
-                print(f"multilabel_cov_penalty after transformation = {multilabel_cov_penalty}")
+            # if True:
+            #     eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
+            #     multilabel_cov_penalty = 0.
+            #     for i, label in enumerate(labels):
+            #         X_label = X[y == label]
+            #         cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
+            #         multilabel_cov_penalty += (cov_label[0, 1]) ** 2
+            #     print(f"multilabel_cov_penalty after transformation = {multilabel_cov_penalty}")
             print()
 
     def _dissimilarity_analysis(self, theta, bidirectional=False):
