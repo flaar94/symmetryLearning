@@ -437,15 +437,13 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         else:
             return X @ self.trans_.T
 
-
     def gt_swap_score(self, X):
-        BATCH_SIZE = 1_024
+        BATCH_SIZE = 512
         dataset = TensorDataset(torch.tensor(X, dtype=torch.float, device=self.device))
         # tensor_trans = torch.tensor(self.trans_.T, dtype=torch.double, device=self.device)
         d = X.shape[1]
 
         width = round(np.sqrt(d))
-
 
         class LinearNN(nn.Module):
             def __init__(self, dim):
@@ -475,17 +473,17 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
         criterion = nn.MSELoss()
         linear_nn.eval()
         loss = 0.
-        for i, data in enumerate(trainloader, 0):
-            # get the inputs
-            inputs, = data
-            inputs = inputs.to(self.device)
+        with torch.no_grad():
+            for i, data in enumerate(trainloader, 0):
+                # get the inputs
+                inputs, = data
+                inputs = inputs.to(self.device)
 
-            outputs = linear_nn(inputs)
-            loss += criterion(torch.flip(inputs.view(-1, width, width), (2,)).view(-1, d), outputs)
+                outputs = linear_nn(inputs)
+                loss += criterion(torch.flip(inputs.view(-1, width, width), (2,)).view(-1, d), outputs)
 
         return loss / len(trainloader)
-            # print(epoch, i, loss)
-
+        # print(epoch, i, loss)
 
     def fine_tune(self, X, lr=0.01, epochs=100, weight_penalty_adj=3_000, bandwidth=10, negativity_penalty=False):
         BATCH_SIZE = 1_024
@@ -574,13 +572,14 @@ class SymmetryFinder(BaseEstimator, RegressorMixin):
 
 
 class SymmetryFinderLabel(SymmetryFinder):
-    def __init__(self, select_method='', fit_method='', bidirectional=False, **kwargs):
+    def __init__(self, select_method='', fit_method='', bidirectional=False, heal_eigenvectors=False, **kwargs):
         kwargs['select_method'] = select_method
         kwargs['fit_method'] = fit_method
         self.bidirectional = bidirectional
+        self.heal_eigenvectors = heal_eigenvectors
         super().__init__(**kwargs)
 
-    def fit(self, X: np.array, y: np.array = None, overall_cov=None, heal_eigenvectors=False):
+    def fit(self, X: np.array, y: np.array = None, overall_cov=None):
 
         if self.tv_ratio != 1:
             X_train, X_val = train_test_split(X, train_size=int(X.shape[0] * self.tv_ratio),
@@ -596,7 +595,7 @@ class SymmetryFinderLabel(SymmetryFinder):
 
         self.compute_base_stats(X_train, overall_cov)
 
-        if heal_eigenvectors:
+        if self.heal_eigenvectors:
             self._heal_eigenvectors(X_train, y)
 
         self.num_labels_ = len(np.unique(y))
@@ -644,7 +643,8 @@ class SymmetryFinderLabel(SymmetryFinder):
         # plt.show()
         return self
 
-    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=0.1, eigenvalue_size_threshold=10 ** -8, penalty_variation_threshold=10):
+    def _heal_eigenvectors(self, X, y, eigenvalue_diff_threshold=0.1, eigenvalue_size_threshold=10 ** -8,
+                           penalty_variation_threshold=10):
         labels = np.unique(y)
         # label_covs = []
         label_covs = [np.cov(X[y == label], rowvar=False) for label in labels]
@@ -655,13 +655,13 @@ class SymmetryFinderLabel(SymmetryFinder):
             # Grab pairs of adjacent eigenvectors/eigenvalues
             eigenvalues = self.cov_eigenvalues_[i - 1:i + 1]
             if (eigenvalues.min() < eigenvalue_size_threshold):
-                print(f"One of eigenvalues = ({eigenvalues[0], eigenvalues[1]}) less than {eigenvalue_size_threshold}")
+                # print(f"One of eigenvalues = ({eigenvalues[0], eigenvalues[1]}) less than {eigenvalue_size_threshold}")
                 continue
             if (np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() > eigenvalue_diff_threshold):
-                print(
-                    f"(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() = {np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min()} > {eigenvalue_diff_threshold}")
+                # print(
+                #     f"(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min() = {np.abs(eigenvalues[0] - eigenvalues[1]) / eigenvalues.min()} > {eigenvalue_diff_threshold}")
                 continue
-            print(i)
+            # print(i)
             eigenvectors = self.eigenvectors_[:, i - 1:i + 1]
             proj_label_covs = [eigenvectors.T @ label_cov @ eigenvectors for label_cov in label_covs]
             numerator = 0
@@ -684,7 +684,7 @@ class SymmetryFinderLabel(SymmetryFinder):
             base_angle = - np.arctan(numerator / denominator) / 4
             # We want to keep the angle as small as possible in absolute terms so we aren't switching which vectors are
             # fixed vs. variable
-            potential_angles = [base_angle, base_angle + np.pi / 4 if base_angle < 0 else base_angle - np.pi/4]
+            potential_angles = [base_angle, base_angle + np.pi / 4 if base_angle < 0 else base_angle - np.pi / 4]
 
             for j, potential_angle in enumerate(potential_angles):
                 # print(f"potential angle {j+1} = {potential_angle * 180 / np.pi}")
@@ -703,16 +703,16 @@ class SymmetryFinderLabel(SymmetryFinder):
                 cov_penalties.append(multilabel_cov_penalty)
             if np.abs(cov_penalties[0] - cov_penalties[1]) / np.min(cov_penalties) < penalty_variation_threshold:
                 continue
-            print(f"potential angles = {potential_angles}, {np.argmin(cov_penalties)=}")
-            print(f"{cov_penalties=}")
+            # print(f"potential angles = {potential_angles}, {np.argmin(cov_penalties)=}")
+            # print(f"{cov_penalties=}")
             optimal_angle = potential_angles[np.argmin(cov_penalties)]
             c, s = np.cos(optimal_angle), np.sin(optimal_angle)
             optimal_rotation = np.array(((c, -s), (s, c)))
 
-            print(eigenvalues)
-
-            print(f"optimal angle in degrees={optimal_angle * 180 / np.pi}")
-            print(optimal_rotation)
+            # print(eigenvalues)
+            #
+            # print(f"optimal angle in degrees={optimal_angle * 180 / np.pi}")
+            # print(optimal_rotation)
 
             # def compute_gt_angle(vector, dim):
             #     vector = copy.copy(vector)
@@ -745,7 +745,7 @@ class SymmetryFinderLabel(SymmetryFinder):
             #         cov_label = eigenvectors.T @ np.cov(X_label, rowvar=False) @ eigenvectors
             #         multilabel_cov_penalty += (cov_label[0, 1]) ** 2
             #     print(f"multilabel_cov_penalty after transformation = {multilabel_cov_penalty}")
-            print()
+            # print()
 
     def _dissimilarity_analysis(self, theta, bidirectional=False):
         # Start the fixed point cluster with the auxiliary node
@@ -839,10 +839,9 @@ class SymmetryFinder2(BaseEstimator, RegressorMixin):
 
     def fit(self, X: np.array, y: np.array = None):
         cov = np.cov(X, rowvar=False)
-        self.cov_eigenvalues_ = np.real(np.linalg.eig(cov)[0])
-        self.eigenvectors_ = np.real(np.linalg.eig(cov)[1])
+        self.cov_eigenvalues_ = np.real(np.linalg.eigh(cov)[0])
+        self.eigenvectors_ = np.real(np.linalg.eigh(cov)[1])
         self.mu_ = np.mean(X, axis=0)
-
         self.sol_ = np.linalg.solve(self.eigenvectors_, self.mu_)
         self.trivial_vectors_ = (self.sol_ < self.ignore_threshold) & (self.cov_eigenvalues_ < self.ignore_threshold)
         self.sol_ *= ~self.trivial_vectors_
