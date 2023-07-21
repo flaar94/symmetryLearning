@@ -1,6 +1,27 @@
+"""
+In this experiment we test how well two refinements of the label-based symmetry finding algorithms work compared to the
+original. These are marked as "bidirectional" and "heal_eigenvectors".
+
+- Bidirectional: follows the normal eigenvector computation and selection process identically, but then at the end of
+eigenvector selection, it throws out the part of the evaluation function involving the mean, and then greedily adds or
+removes vectors until switching vectors between sets ceases to improve performance, or it goes through dim steps.
+
+- heal_eigenvectors: tries to use extra information from the labels to improve the accuracy of eigenvectors which have
+very close eigenvalues. For every pair of eigenvalues that are within 1% of each other, (among other requirements), it
+analytically finds the optimal rotation to minimize the mean covariance between them in the mono-labeled subdatasets.
+
+If they are in opposite eigenspaces for the transformation matrix, this will try to push them to be orthogonal, and make
+the transformation better respect the mono-labeled subdataset covariance matrices. If they are in the same eigenspace,
+this shouldn't make much difference because any linear combination will still be in the same eigenspace...at least in
+theory. In practice, this could potentially mess with the eigenvector selection process by reducing the covariance of
+same-eigenspace vectors making the selection algorithm less likely to place them in the same eigenspace. Because of this
+we try to identify when two eigenvectors are in the same transformation matrix eigenspace by looking at the span of
+errors in the optimization process. Same-eigenspace eigenvectors will tend to have a smaller span, because there should
+be no consistent way of making them uncorrelated in all mono-labeled subdatasets simultaneously
+"""
+
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 from core import SymmetryFinder, SymmetryFinderLabel
 from numpy.random import default_rng
 import torchvision
@@ -10,8 +31,6 @@ import torchvision.transforms as transforms
 from sklearn.utils import shuffle
 import itertools
 import pandas as pd
-import random
-import dill
 from pathlib import Path
 
 DATA_PATH = Path("..") / "data"
