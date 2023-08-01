@@ -22,6 +22,7 @@ import dill
 from pathlib import Path
 
 DATA_PATH = Path("..") / "data"
+RESULT_DATA_PATH = Path("..") / "result_data"
 logging.basicConfig(filename="../logs/robustness_under_unequal_symmetry.log", level=logging.INFO)
 
 
@@ -150,4 +151,4 @@ if __name__ == '__main__':
             print(msg)
         # df_acc.loc[space_dim, method] = accs[0]
         # df_cov_acc.loc[dataset, space_dim] = accs[1]
-    pd.DataFrame(acc_records).to_csv(DATA_PATH / "robustness_under_equal_symmetry.csv", index=False, header=True)
+    pd.DataFrame(acc_records).to_csv(RESULT_DATA_PATH / "robustness_under_unequal_symmetry.csv", index=False, header=True)
